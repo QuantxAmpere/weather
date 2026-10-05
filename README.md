@@ -43,6 +43,13 @@ ln -s "$PWD/weather/weather" ~/.local/bin/weather   # or anywhere on $PATH
 - Colors are emitted only when stdout is a TTY, so piping into a file or another
   program gives clean text.
 
+## Note
+
+This is a small toy project, written entirely by **DeepSeek V4.1 Flash**
+(`commandcode/deepseek/deepseek-v4.1-flash`, low reasoning) in a single session,
+as a personal evaluation of how well that model handles my day-to-day work and how
+fast it gets there. It is not meant to be a polished or maintained tool.
+
 ## Requirements
 
 `bash`, `curl`, `jq`. The fuzzy-location fallback additionally needs
