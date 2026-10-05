@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Weather TUI: ./weather <location>
+set -euo pipefail
+
+[ $# -ge 1 ] || { echo "usage: ${0##*/} <location>" >&2; exit 1; }
+loc="$*"
+
+geo() { curl -fsS --connect-timeout 5 --max-time 10 --get \
+  'https://geocoding-api.open-meteo.com/v1/search' \
+  --data-urlencode "name=$1" --data 'count=1&language=en&format=json'; }
+
+hits() { jq -e '.results | length > 0' >/dev/null 2>&1; }
+
+if ! geo "$loc" | hits; then
+  # Geocoder choked on the exact wording; let pi find one that resolves.
+  loc=$(timeout 90 pi -p --provider commandcode --model deepseek/deepseek-v4.1-flash --thinking low \
+        --no-session -a --tools bash,read \
+        --no-extensions --no-skills --no-prompt-templates --no-context-files \
+        --append-system-prompt 'Reply with nothing but the answer. No prose, no fences, no explanation.' \
+        "The Open-Meteo geocoder at https://geocoding-api.open-meteo.com/v1/search?count=1&format=json&name=<q> returns no results for name=\"$loc\", so this command prints nothing useful: ./weather \"$loc\".\n\nFind a short <q> that does resolve to the intended place, and verify it with that curl call before answering. Do not run ./weather itself.\n\nReply with only that one search string, or NONE if nothing resolves." \
+        </dev/null | tr -d '"`\r' | awk 'NF' | tail -n1) || true
+  [ -n "$loc" ] && [ "$loc" != NONE ] || { echo "location not found: $*" >&2; exit 1; }
+  [ -n "$loc" ] || { echo "location not found: $*" >&2; exit 1; }
+  echo "→ retrying with: $loc" >&2
+  geo "$loc" | hits || { echo "location not found: $*" >&2; exit 1; }
+fi
+
+geo=$(geo "$loc")
+IFS=$'\t' read -r lat lon label < <(jq -r '.results[0] | "\(.latitude)\t\(.longitude)\t\(.name)\(if .admin1 != null and .admin1 != .name then ", " + .admin1 else "" end)\(if .country != null then ", " + .country else "" end)"' <<<"$geo")
+
+w=$(curl -fsS --connect-timeout 5 --max-time 10 --get \
+  'https://api.open-meteo.com/v1/forecast' \
+  --data-urlencode "latitude=$lat" --data-urlencode "longitude=$lon" \
+  --data 'current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m,wind_direction_10m,pressure_msl' \
+  --data 'daily=temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code,sunrise,sunset' \
+  --data 'timezone=auto&forecast_days=1')
+
+if [ -t 1 ]; then B=$'\e[1m'; D=$'\e[2m'; C=$'\e[36m'; R=$'\e[0m'; else B=; D=; C=; R=; fi
+
+printf '%s🌍  %s%s\n' "$B" "$label" "$R"
+
+
+jq -nr --argjson w "$w" '
+def desc(c): ({
+  "0":"Clear sky","1":"Mainly clear","2":"Partly cloudy","3":"Overcast",
+  "45":"Fog","48":"Depositing rime fog","51":"Light drizzle","53":"Moderate drizzle","55":"Dense drizzle",
+  "61":"Slight rain","63":"Moderate rain","65":"Heavy rain","66":"Light freezing rain","67":"Heavy freezing rain",
+  "71":"Slight snow","73":"Moderate snow","75":"Heavy snow","77":"Snow grains",
+  "80":"Slight rain showers","81":"Moderate rain showers","82":"Violent rain showers",
+  "85":"Slight snow showers","86":"Heavy snow showers",
+  "95":"Thunderstorm","96":"Thunderstorm with slight hail","99":"Thunderstorm with heavy hail"
+}[c | tostring]) // "Unknown";
+def hm(t): t | sub(".*T"; "");
+def dir(d): ["N","NE","E","SE","S","SW","W","NW"][((d/45)+0.5|floor) % 8];
+def arrow(d): ["↑","↗","→","↘","↓","↙","←","↖"][((d/45)+0.5|floor) % 8];
+[
+  ["M", "\($w.latitude), \($w.longitude) · \($w.elevation | round) m"],
+  ["S", "🕐", "Current Time"],
+  ["M", "\($w.current.time | sub("T"; " "))   (\($w.timezone))"],
+  ["S", "☀️", "Now — \(desc($w.current.weather_code))"],
+  ["R", "🌡️", "Temperature", "\($w.current.temperature_2m) °C (feels like \($w.current.apparent_temperature) °C)"],
+  ["R", "💧", "Humidity", "\($w.current.relative_humidity_2m) %"],
+  ["R", "🌬️", "Wind", "\($w.current.wind_speed_10m) km/h \(arrow($w.current.wind_direction_10m)) \(dir($w.current.wind_direction_10m))"],
+  ["R", "🌧️", "Precipitation", "\($w.current.precipitation) mm"],
+  ["R", "🧭", "Pressure", "\($w.current.pressure_msl) hPa"],
+  ["S", "📅", "Today — \(desc($w.daily.weather_code[0]))"],
+  ["R", "🔻", "Min / Max", "\($w.daily.temperature_2m_min[0]) °C / \($w.daily.temperature_2m_max[0]) °C"],
+  ["R", "🌧️", "Rain total", "\($w.daily.precipitation_sum[0]) mm"],
+  ["R", "🌅", "Sunrise", "\(hm($w.daily.sunrise[0]))   Sunset \(hm($w.daily.sunset[0]))"]
+] | .[] | @tsv
+' |
+while IFS=$'\t' read -r kind a b c; do
+  case $kind in
+    S) printf '\n%s%s %s%s\n' "$B$C" "$a" "$b" "$R" ;;
+    M) printf '   %s\n' "$a" ;;
+    R) printf '   %s  %s%-14s%s %s\n' "$a" "$D" "$b" "$R" "$c" ;;
+  esac
+done
